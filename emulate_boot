@@ -1,0 +1,18 @@
+#! /bin/sh
+for emu in kvm kvm-qemu qemu-kvm qemu ERROR
+do
+	case $emu in
+		ERROR) echo "No emulator installed!" >& 2; false; exit
+	esac
+	emu=`which "$emu" 2> /dev/null` || continue
+	set -- "$emu" -rtc base=localtime,clock=host -net none -k de -m 2M
+	set -- "$@" -name "MS-DOS MBR Test"
+	set -- "$@" -uuid 48f6e600-ddc7-11e2-bc4a-001d7dd0d12e
+	set -- "$@" -smp 1
+	d="file=disk.img,index=0,snapshot=off,media=disk,boot=on"
+	d="$d,serial=1NC5626A"
+	set -- "$@" -drive "$d"
+	echo "Running: >>>$*<<<." >& 2
+	exec "$@"
+	echo "Failed!" >& 2; false; exit
+done

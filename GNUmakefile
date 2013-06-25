@@ -8,7 +8,7 @@ all: $(TARGETS)
 .SUFFIXES: .bin .asm
 
 .asm.bin:
-	nasm -o "$@" "$<"
+	nasm -l "$*".lst -o "$@" "$<"
 
 clean:
 	-rm $(TARGETS)
