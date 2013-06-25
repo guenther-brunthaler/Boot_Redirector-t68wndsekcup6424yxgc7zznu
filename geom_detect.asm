@@ -25,18 +25,30 @@ entry:		cli
 		call puts
 .stop:		hlt
 		jmp .stop
+
+; Video BIOS services may trash AX, SI, DI, BP unless used for results.
 puts:		; displays null-terminated string in [DS:SI]++
+		push ax
 		push bx
+		push bp
+		push di
 		mov ah,0fh
+		push si
 		int 10h ; get active video page into BH, trashes AX
-		xor bh,0bh ; foreground color (most likely unused)
-		mov ah,0eh ; 'tty output' action code for INT10h
+		pop si
+		mov bl,0bh ; foreground color (most likely unused)
 .loop:		lodsb
 		test al,al
 		jz .end
+		mov ah,0eh ; 'tty output' action code for INT10h
+		push si
 		int 10h
+		pop si
 		jmp short .loop
-.end:		pop bx
+.end:		pop di
+		pop bp
+		pop bx
+		pop ax
 		ret
 
 hello:		db 'Hello, world!', 13, 10, 0
