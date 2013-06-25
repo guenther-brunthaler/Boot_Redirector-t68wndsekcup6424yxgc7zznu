@@ -187,5 +187,3 @@ tpl_end:
 endconfig:	db '*****', 13, 10
 		times (sectorsize - ($ - entry) - 2) db 'x'
 		db 55h, 0aah
-
-		end
