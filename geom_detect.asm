@@ -15,40 +15,14 @@ entry:		cli
 		jmp 0:.entry2
 .entry2:	; Set up flat address space.
 		xor ax,ax
-                mov ss,ax
-                mov es,ax
-                mov ss,ax
-                mov sp,load_addr
+		mov ss,ax
+		mov es,ax
+		mov ss,ax
+		mov sp,load_addr
 		cld
 		sti
-		xor dl,dl
-		mov si, text
-		call puts
-		mov ax, 0
-		call putns
-		mov ax, 10
-		call putns
-		mov ax, 100
-		call putns
-		mov ax, 1000
-		call putns
-		mov ax, 32767
-		call putns
-		mov ax, 32768
-		call putns
-		mov ax, 65535
-		call putns
-		jmp stop
-text:		db 'Testing:', 13, 10, 0
-		db '==0', 13, 10, 0
-		db '==10', 13, 10, 0
-		db '==100', 13, 10, 0
-		db '==1000', 13, 10, 0
-		db '==32767', 13, 10, 0
-		db '==32768', 13, 10, 0
-		db '==65535', 13, 10, 0
-
-enum:		mov ah,0dh; Alternate Disk Reset.
+		xor dl,dl ; Drive number to operate on.
+enum:		xor ah,ah; Reset Disk System.
 		push dx
 		int 13h
 		mov al,ah
@@ -96,22 +70,23 @@ stop:		hlt
 		jmp stop
 
 putn:		; Display an unsigned decimal integer in AX.
+		push ax
 		push bx
 		push dx
-		push cx
 		mov bx,10
 		call .putn1
-		pop cx
 		pop dx
 		pop bx
+		pop ax
 		ret
 
-.putn1:		cmp ax,bx
+.putn1:		; Integer in AX. BX == 10. DX and AX can be trashed.
+		cmp ax,bx
 		jb .last ; It is only a single decimal digit.
-		xor dx,dx
+		xor dx,dx ; Dividend is DX:AX.
 		div bx ; Otherwise divide by 10.
-		push dx
-		call .putn1 ; Display the leading digits first.
+		push dx ; Remainder.
+		call .putn1 ; Recursively display the leading digits first.
 		pop ax ; Display the last digit now.
 .last:		add al,'0' ; Make it an ASCII character.
 		; Fall through.
@@ -143,16 +118,19 @@ video:		; Displays character or string depending on code in AH.
 		pop ax
 		mov bl,0bh ; Foreground color (most likely unused).
 		cmp ah,0
-		je .char
+		jne .string
+		call .single
+.end:		pop di
+		pop bp
+		pop bx
+		pop ax
+		ret
 
-.loop:		lodsb
+.string:	lodsb
 		test al,al
 		jz .end
-		mov ah,0eh ; 'tty output' action code for INT10h.
-		push si
-		int 10h
-		pop si
-		jmp short .loop
+		call .single
+		jmp short .string
 
 .single:	mov ah,0eh ; 'tty output' action code for INT10h.
 		push si
@@ -160,12 +138,6 @@ video:		; Displays character or string depending on code in AH.
 		pop si
 		ret
 
-.char		call .single
-.end:		pop di
-		pop bp
-		pop bx
-		pop ax
-		ret
 
 msg:		db 'Disk parameters for device ', 0
 		db ':', 13, 10, 0

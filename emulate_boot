@@ -9,9 +9,21 @@ do
 	set -- "$@" -name "MS-DOS MBR Test"
 	set -- "$@" -uuid 48f6e600-ddc7-11e2-bc4a-001d7dd0d12e
 	set -- "$@" -smp 1
-	d="file=disk.img,index=0,snapshot=off,media=disk,boot=on"
+	d="file=disk.img,index=0,snapshot=off,media=disk"
 	d="$d,serial=1NC5626A"
+	if test -f cdrom.img
+	then
+		d="$d,boot=off"
+	else
+		d="$d,boot=on"
+	fi
 	set -- "$@" -drive "$d"
+	if test -f cdrom.img
+	then
+		d="file=cdrom.img,index=2,snapshot=off,media=cdrom"
+		d="$d,serial=1NC5626B,boot=on"
+		set -- "$@" -drive "$d"
+	fi
 	echo "Running: >>>$*<<<." >& 2
 	exec "$@"
 	echo "Failed!" >& 2; false; exit
