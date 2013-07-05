@@ -1,4 +1,8 @@
-; Print drive geometry
+; Enumerate partitions.
+;
+; (c) 2013 by Guenther Brunthaler.
+; This source file is free software.
+; Distribution is permitted under the terms of the GPLv3.
 
 ; The code or the original MBR and chained boot block will be loaded there.
 load_addr	equ 07c00h
@@ -85,6 +89,10 @@ s1start:	cli
 		sti
 
 		; Copy the partition table.
+		;
+		; We don't change the offsets relative to the start of the
+		; sector, allowing easier manual code review. Also there is
+		; enough memory available.
 		mov si,(s1start + pt_off)
 		mov di,(pblock_addr + pt_off)
 		mov cx,(pt_size + sig_size)
@@ -93,6 +101,9 @@ s1start:	cli
 		loop .pcopy
 
 		; Copy the remaining code.
+		;
+		; Maintain the same relative offsets for the same reasons as
+		; when copying the partition table.
 		mov si,s1end
 		mov di,(s1size + run_addr)
 		mov cx,s2size
@@ -108,29 +119,29 @@ s1size		equ s1end - s1start
 		section code2copy follows=.text \
 		        vstart=(s1size + run_addr) align=1
 s2start:	xor dl,dl ; Drive number to operate on.
-enum:		xor ah,ah; Reset Disk System.
-		push dx
-		int 13h
-		mov al,ah
-		xor ah,ah
+enum_drives:	xor ah,ah; Reset Disk System.
+		; Disk BIOS services may potentially trash: AX, SI, DI, BP, ES.
+		push es
+		int 13h ; AH=result code; CF=1 on error.
+		pop es
+		jnc .getgeom
 		mov si,error
 		call puts
+		mov al,ah
+		xor ah,ah
 		call putns
-		jmp stop
-
-		jc .nextdrive
-		pop dx
-		mov ah,8 ; Get Current Drive Parameters.
-		push dx
+		jmp .nextdrive
+.getgeom:	mov ah,8 ; Get Current Drive Parameters.
+		push es
 		int 13h
-		jnc report
-.nextdrive:	pop dx
-		mov dh,80
+		pop es
+		jnc .report
+.nextdrive:	mov dh,80
 		cmp dl,dh
 		jae done
 		mov dl,dh
-		jmp enum
-report:		mov si,msg
+		jmp enum_drives
+.report:	mov si,msg
 		call puts
 		mov al,dl ; # of drives.
 		xor ah,ah
@@ -148,7 +159,7 @@ report:		mov si,msg
 		call putns
 		pop dx
 		inc dl
-		jmp enum
+		jmp enum_drives
 
 done:		mov si,endtext
 		call puts
