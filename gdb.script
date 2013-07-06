@@ -1,0 +1,8 @@
+# $ gdb -x gdb.script
+target remote tcp:localhost:1234
+set architecture i8086
+break *0x7c00
+echo It seems you need to remove the breakpoint\n
+echo before "si" will work again: "delete 1"\n
+x/10i $cs*16+$eip
+cont

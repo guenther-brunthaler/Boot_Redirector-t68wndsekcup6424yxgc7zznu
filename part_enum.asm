@@ -38,7 +38,8 @@ sig_off		equ sector_size - sig_size
 
 ; Partition table.
 pte_size	equ 10h
-pt_size		equ 4 * pte_size
+pt_num_entries	equ 4
+pt_size		equ pt_num_entries * pte_size
 pt_off		equ sig_off - pt_size
 
 ; Partition entry offset for type octet.
@@ -46,6 +47,8 @@ pte_type	equ 4
 
 ; Partition entry offset for relative sectors.
 pte_relsecs	equ 8
+pte_relsecs_size \
+		equ 8
 
 ; Partition entry offset for sector count.
 pte_totalsecs	equ 0ch
@@ -74,11 +77,6 @@ s_rev_level_max	equ 7
 s_uuid_off	equ 68h
 s_uuid_size	equ 16
 
-
-; Normalized load segment and offset
-%define fpseg(flat) ((flat) / 10h)
-%define fpoff(flat) ((flat) & 0fh)
-
 		cpu 8086
 		bits 16
 
@@ -94,6 +92,10 @@ s1start:	cli
 		mov sp,stacktop_addr
 		cld
 		sti
+		xor ax,ax
+waitx:		nop
+		cmp ax,0
+		je waitx
 		
 		; Parse ascii hex literals into binary for later comparison.
 		mov si,ascii_ptype
@@ -175,7 +177,86 @@ enum_parttabs:	; Examine next partition table on current drive.
 		rep movsb
 		
 		; Examine partition table of MBR or EBR in 2 phases.
-		mov si,(run_addr + pt_off)
+		mov dh,[ptype_off] ; First, search for boot partition type.
+
+		; Examine partiton table in current phase.
+enum_phases:	mov si,(run_addr + pt_off + pte_type)
+		mov cx, pt_num_entries
+		
+enum_parts:	cmp dh,[si] ; DH contains partition type to locate.
+		jne nextpart
+
+		; Partition type matches.
+		cmp dh,5 ; Are we in phase # 2 (seaching for "EXTENDED")?
+		pushf ; Remember result.
+		mov bx,2 ; We will load an ext2+ super block.
+		jne .have_offset ; But only in phase # 1.
+		xor bx,bx ; Otherwise, load an EBR in phase # 2.
+
+		; Add BX to RELSECS from PT entry as the new sector number.
+.have_offset:	push si
+		add si,(pte_relsecs - pte_type)
+		mov di,sector
+		push cx
+		mov cx,4 ; Add QWORDs.
+		clc ; CF=0 initially.
+.addquad	lodsw
+		adc ax,bx ; Add BX and CF to AX.
+		stosw
+		xor bx,bx ; Add only CF in the next loop iteration.
+		loop .addquad
+		pop cx
+		pop si
+
+		popf ; Recall whether we are in phase # 2.
+		je enum_parttabs ; Examine next EBR.
+
+		; Phase # 1 - try to read an ext2+ superblock.
+		call read_sector
+		jc  nextpart ; Could not read it - ignore partition.
+		
+		; Check superblock magic.
+		mov ax,[load_addr + s_magic_off]
+		cmp ax,ext_magic
+		jne nextpart ; does not match.
+		
+		; Check whether there is a UUID.
+		mov ax,[load_addr + s_rev_level_off] ; Must be at least 1.
+		cmp ax, 0
+		jnz nextpart ; No UUID.
+		
+		; Finally, compare the UUID itself.
+		push si
+		push cx
+		mov si,[load_addr + s_uuid_off]
+		mov di,[uuid_off]
+		mov cx,s_uuid_size
+		repe cmpsb ; ZF=1 only if match and loop is exhausted.
+		pop cx
+		pop si
+		jne nextpart ; UUIDs did not match.
+		
+		; We have found the searched-for partition!
+		; Load its boot block.
+		add si,(pte_relsecs - pte_type)
+		mov di,sector
+		mov cx,pte_relsecs_size ; Copy one QWORDs.
+		rep movsb
+		call read_sector
+		jc stop ; We are fucked! Extremely unlikely to happen, though.
+		
+		; Execute to loaded boot code.
+		mov si,found
+		jmp 0:load_addr
+		
+nextpart:	; DH is match ptype, SI is PTE type field, CX is PTE counter.
+		add si,pte_size
+	l	loop enum_parts
+		mov ah,5 ; Type of an "EXTENDED" partition.
+		cmp dh,ah ; Are we in phase # 2 already?
+		je nextdrive ; No more partiton tables on this drive.
+		mov dh,ah ; Next phase - search for EXTENDED partition.
+		jmp enum_phases
 		
 nextdrive:	inc dl
 		mov dh,7fh
@@ -183,7 +264,7 @@ nextdrive:	inc dl
 		cmp dh,[bda_hdd_count]
 		jb enum_drives
 
-		mov si,not_found
+debug:		mov si,not_found
 		call puts
 stop:		hlt
 		jmp stop
@@ -200,73 +281,30 @@ read_sector:	; Read sector with currently set sector number in DAP.
 		pop ax
 		ret
 
-putn:		; Display an unsigned decimal integer in AX.
-		push ax
-		push bx
-		push dx
-		mov bx,10
-		call .putn1
-		pop dx
-		pop bx
-		pop ax
-		ret
-
-.putn1:		; Integer in AX. BX == 10. DX and AX can be trashed.
-		cmp ax,bx
-		jb .last ; It is only a single decimal digit.
-		xor dx,dx ; Dividend is DX:AX.
-		div bx ; Otherwise divide by 10.
-		push dx ; Remainder.
-		call .putn1 ; Recursively display the leading digits first.
-		pop ax ; Display the last digit now.
-.last:		add al,'0' ; Make it an ASCII character.
-		; Fall through.
-
-putc:		; Display an ASCII character in AL.
-		push ax
-		xor ah,ah ; Code for "display character".
-		jmp video
-
-putns:		; Display unsigned number in AX and then call puts.
-		call putn
-		; Fall through.
-
 puts:		; Displays null-terminated string in [DS:SI]++
 		push ax
-		mov ah,01h ; Code for "display string".
-		; Fall through.
-
-; Video BIOS services may trash AX, SI, DI, BP unless used for results.
-video:		; Displays character or string depending on code in AH.
 		push bx
 		push bp
 		push di
-		push ax
+		; Video BIOS services may trash AX, SI, DI, BP unless used for
+		; results.
 		mov ah,0fh
 		push si
 		int 10h ; Get active video page into BH, trashes AX.
 		pop si
-		pop ax
 		mov bl,0bh ; Foreground color (most likely unused).
-		cmp ah,0
-		jne .string
-		call .single
+.string:	lodsb
+		test al,al
+		jz .end
+		mov ah,0eh ; 'tty output' action code for INT10h.
+		push si
+		int 10h
+		pop si
+		jmp .string
 .end:		pop di
 		pop bp
 		pop bx
 		pop ax
-		ret
-
-.string:	lodsb
-		test al,al
-		jz .end
-		call .single
-		jmp short .string
-
-.single:	mov ah,0eh ; 'tty output' action code for INT10h.
-		push si
-		int 10h
-		pop si
 		ret
 
 dap_tpl:	; DAP - Disk Address Packet (template to be copied).
@@ -284,12 +322,9 @@ sector		equ dap_tpl.sector - load_addr + run_addr
 ; Message text area.
 
 %define NL 13, 10 ; CR/LF is newline.
-%define LNUM 0, '.', NL, 0
 
-debug:		db "Yeah - read a sector!", NL, 0
-
-not_found:	db 'NOT '
-found:		db 'Found ext2+ FS {'
+not_found:	db '*NOT* '
+found:		db 'Found: ext2+ FS {'
 ascii_uuid:	db '67758eb7-5baa-4c14-ba21-cbf38d0180f3'
 		db '} ptype 0x'
 ascii_ptype:	db '83', NL, 0
