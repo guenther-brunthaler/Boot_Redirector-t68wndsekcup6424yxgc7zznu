@@ -17,10 +17,10 @@ run_addr	equ superblock - sector_size
 work_addr	equ run_addr - sector_size
 
 ; Binary partition type to check for.
-ptype_off	equ work_addr
+ptype	equ work_addr
 
 ; Binary UUID to check for.
-uuid_off	equ work_addr + 1
+uuid	equ work_addr + 1
 
 ; The stack (growing down) ends there (exclusive).
 stacktop_addr	equ work_addr
@@ -74,7 +74,7 @@ s_rev_level_max	equ 7
 
 ; Where to find the filesystem UUID. It is stored in the same byte order as
 ; the hex digits are displayed.
-s_uuid_off	equ 68h
+s_uuid	equ 68h
 s_uuid_size	equ 16
 
 		cpu 8086
@@ -92,18 +92,40 @@ s1start:	cli
 		mov sp,stacktop_addr
 		cld
 		sti
-		xor ax,ax
-waitx:		nop
-		cmp ax,0
-		je waitx
 		
 		; Parse ascii hex literals into binary for later comparison.
 		mov si,ascii_ptype
-		mov di,ptype_off
+		mov di,ptype
 		call parse_hex
 		mov si,ascii_uuid
-		mov di,uuid_off
+		mov di,uuid
 		call parse_hex
+		
+		mov si,ptype
+		mov cx,17
+		mov dh,1
+.out:		lodsb
+.rotmore:	ror al,1
+		ror al,1
+		ror al,1
+		ror al,1
+		push ax
+		and al,0fh
+		cmp al,9
+		jbe .ok
+		add al,('A'-('9' + 1))
+.ok:		add al,'0'
+		xor bx,bx
+		mov ah,0eh
+		push si
+		int 10h
+		pop si
+		pop ax
+		neg dh
+		js .rotmore
+		loop .out
+.stop:		hlt
+		jmp .stop
 
 		; Copy the remaining code.
 		;
@@ -121,32 +143,34 @@ waitx:		nop
 		; Parse ASCII hex constant at DS:SI into binary ES:DI.
 		; Stop when a character other than '0'-'9' 'a'-'f' or '-' is
 		; encountered. '-' are NO-OPs.
-parse_hex:	xor ch,ch
+parse_hex:	mov ch,1 ; Toggle.
 .next_digit:	lodsb
-		sub al,'0'
+		cmp al,'-' ; Ignore dashes.
+		je .next_digit
+		sub al,'0' ; ASCII lowercase hex-digit in AL -> binary.
 		jae .lower_ok
 .no_more:	ret
 .lower_ok:	cmp al,10
 		jb .ok
-		sub al,('A' - ('9' + 1))
+		sub al,('a' - ('9' + 1))
 		cmp al,16
 		jae .no_more
-.ok:		mov cl,4
-		shl ah,cl
-		add ah,al
-		inc ch
-		shr ch,1
-		jc .next_digit
-		mov al,ah
+.ok:		mov cl,4 ; AH contains the byte read so far.
+		shl ah,cl ; Shift in the new nibble from the right.
+		or ah,al
+		neg ch ; For every first of 2 digits, it was positive.
+		js .next_digit ; Negative now? Then we need the 2nd digit.
+		mov al,ah ; Byte in AH is complete - add it to the result.
 		stosb
 		jmp .next_digit
 
 s1end:		; Start of source copy area.
 s1size		equ s1end - s1start
 
-		section code2copy follows=.text \
-		        vstart=(s1size + run_addr) align=1
+;		section code2copy follows=.text \
+;		        vstart=(s1size + run_addr) align=1
 s2start:	mov dl,80h ; Drive number to operate on (0x80 = 1st hard disk).
+%ifdef asda
 enum_drives:	mov ah,41h; Get int13 extensions supported by drive.
 		mov bx,[run_addr + sig_off]
 		; Disk BIOS services may potentially trash: AX, SI, DI, BP, ES.
@@ -177,7 +201,7 @@ enum_parttabs:	; Examine next partition table on current drive.
 		rep movsb
 		
 		; Examine partition table of MBR or EBR in 2 phases.
-		mov dh,[ptype_off] ; First, search for boot partition type.
+		mov dh,[ptype] ; First, search for boot partition type.
 
 		; Examine partiton table in current phase.
 enum_phases:	mov si,(run_addr + pt_off + pte_type)
@@ -228,8 +252,8 @@ enum_parts:	cmp dh,[si] ; DH contains partition type to locate.
 		; Finally, compare the UUID itself.
 		push si
 		push cx
-		mov si,[load_addr + s_uuid_off]
-		mov di,[uuid_off]
+		mov si,[load_addr + s_uuid]
+		mov di,[uuid]
 		mov cx,s_uuid_size
 		repe cmpsb ; ZF=1 only if match and loop is exhausted.
 		pop cx
@@ -321,6 +345,7 @@ sector		equ dap_tpl.sector - load_addr + run_addr
 
 ; Message text area.
 
+%endif
 %define NL 13, 10 ; CR/LF is newline.
 
 not_found:	db '*NOT* '
