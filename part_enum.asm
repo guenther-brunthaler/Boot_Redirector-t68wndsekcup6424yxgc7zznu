@@ -53,6 +53,10 @@ pte_relsecs_size \
 ; Partition entry offset for sector count.
 pte_totalsecs	equ 0ch
 
+; Partition type for "EXTENDED" partitions. These form a linked chain we need
+; to traverse in order to locate all logical drives (if any).
+ptype_EXTENDED:	equ 5
+
 ; "Disk serial number valid"-indicator size, precedes partition table.
 sn_ind_size	equ 2
 
@@ -77,6 +81,18 @@ s_rev_level_max	equ 7
 s_uuid	equ 68h
 s_uuid_size	equ 16
 
+s_offset_superblock \
+		equ 2
+
+%macro		hello83 0
+		pushf
+		push si
+		mov si,ascii_ptype
+		call puts
+		popf
+		pop si
+%endmacro
+
 		cpu 8086
 		bits 16
 
@@ -94,38 +110,12 @@ s1start:	cli
 		sti
 		
 		; Parse ascii hex literals into binary for later comparison.
-		mov si,ascii_ptype
+		mov si,(ascii_ptype - s2start + s1end)
 		mov di,ptype
 		call parse_hex
-		mov si,ascii_uuid
+		mov si,(ascii_uuid - s2start + s1end)
 		mov di,uuid
 		call parse_hex
-		
-		mov si,ptype
-		mov cx,17
-		mov dh,1
-.out:		lodsb
-.rotmore:	ror al,1
-		ror al,1
-		ror al,1
-		ror al,1
-		push ax
-		and al,0fh
-		cmp al,9
-		jbe .ok
-		add al,('A'-('9' + 1))
-.ok:		add al,'0'
-		xor bx,bx
-		mov ah,0eh
-		push si
-		int 10h
-		pop si
-		pop ax
-		neg dh
-		js .rotmore
-		loop .out
-.stop:		hlt
-		jmp .stop
 
 		; Copy the remaining code.
 		;
@@ -142,7 +132,7 @@ s1start:	cli
 		
 		; Parse ASCII hex constant at DS:SI into binary ES:DI.
 		; Stop when a character other than '0'-'9' 'a'-'f' or '-' is
-		; encountered. '-' are NO-OPs.
+		; encountered. '-' are NO-OPs. Trashes AX and CX.
 parse_hex:	mov ch,1 ; Toggle.
 .next_digit:	lodsb
 		cmp al,'-' ; Ignore dashes.
@@ -167,12 +157,13 @@ parse_hex:	mov ch,1 ; Toggle.
 s1end:		; Start of source copy area.
 s1size		equ s1end - s1start
 
-;		section code2copy follows=.text \
-;		        vstart=(s1size + run_addr) align=1
+		section code2copy follows=.text \
+		        vstart=(s1size + run_addr) align=1
 s2start:	mov dl,80h ; Drive number to operate on (0x80 = 1st hard disk).
-%ifdef asda
+		; Assigned variables at this point:
+		; DL: Drive number.
 enum_drives:	mov ah,41h; Get int13 extensions supported by drive.
-		mov bx,[run_addr + sig_off]
+		mov bx,[run_addr + sig_off] ; Required signature argument.
 		; Disk BIOS services may potentially trash: AX, SI, DI, BP, ES.
 		push es
 		int 13h
@@ -183,7 +174,7 @@ enum_drives:	mov ah,41h; Get int13 extensions supported by drive.
 		jnc nextdrive ; LBA packet addressing not supported.
 		
 		; Examine drive - set MBR at sector 0 to be examined next.
-		mov di,sector
+		mov di,sector ; Zero 8 bytes of [sector].
 		xor ax,ax
 		stosw
 		stosw
@@ -203,30 +194,39 @@ enum_parttabs:	; Examine next partition table on current drive.
 		; Examine partition table of MBR or EBR in 2 phases.
 		mov dh,[ptype] ; First, search for boot partition type.
 
-		; Examine partiton table in current phase.
-enum_phases:	mov si,(run_addr + pt_off + pte_type)
+enum_phases:	; Examine partiton table in current phase.
+		;
+		; Assigned variables at this point:
+		; DL: Drive number.
+		; DH: Partition type to search for in this phase.
+		mov si,(run_addr + pt_off + pte_type)
 		mov cx, pt_num_entries
 		
-enum_parts:	cmp dh,[si] ; DH contains partition type to locate.
+enum_parts:	; Assigned variables at this point:
+		; DL: Drive number.
+		; DH: Partition type to search for in this phase.
+		; SI: Points at the partition type field of the current PTE.
+		; CX: Number of remaining partitions in current table.
+		cmp dh,[si] ; DH contains partition type to locate.
 		jne nextpart
 
 		; Partition type matches.
-		cmp dh,5 ; Are we in phase # 2 (seaching for "EXTENDED")?
+		cmp dh,ptype_EXTENDED ; Are we in phase # 2?
 		pushf ; Remember result.
-		mov bx,2 ; We will load an ext2+ super block.
+		mov bx,s_offset_superblock ; We will load an ext2+ super block.
 		jne .have_offset ; But only in phase # 1.
 		xor bx,bx ; Otherwise, load an EBR in phase # 2.
 
 		; Add BX to RELSECS from PT entry as the new sector number.
 .have_offset:	push si
-		add si,(pte_relsecs - pte_type)
+		add si,(pte_relsecs - pte_type) ; Point to RELSECS field.
 		mov di,sector
 		push cx
-		mov cx,4 ; Add QWORDs.
+		mov cx,4 ; Add QWORDs as 4 * 2 WORDs.
 		clc ; CF=0 initially.
-.addquad	lodsw
+.addquad	lodsw ; Current limb from partition table.
 		adc ax,bx ; Add BX and CF to AX.
-		stosw
+		stosw ; Append limb to sector number.
 		xor bx,bx ; Add only CF in the next loop iteration.
 		loop .addquad
 		pop cx
@@ -246,8 +246,8 @@ enum_parts:	cmp dh,[si] ; DH contains partition type to locate.
 		
 		; Check whether there is a UUID.
 		mov ax,[load_addr + s_rev_level_off] ; Must be at least 1.
-		cmp ax, 0
-		jnz nextpart ; No UUID.
+		cmp ax, 1
+		jb nextpart ; No UUID.
 		
 		; Finally, compare the UUID itself.
 		push si
@@ -271,29 +271,38 @@ enum_parts:	cmp dh,[si] ; DH contains partition type to locate.
 		
 		; Execute to loaded boot code.
 		mov si,found
+		call puts
 		jmp 0:load_addr
 		
-nextpart:	; DH is match ptype, SI is PTE type field, CX is PTE counter.
+nextpart:	; Assigned variables at this point:
+		; DL: Drive number.
+		; DH: Partition type to search for in this phase.
+		; SI: Points at the partition type field of the current PTE.
+		; CX: Number of remaining partitions in current table.
 		add si,pte_size
-	l	loop enum_parts
-		mov ah,5 ; Type of an "EXTENDED" partition.
+		loop enum_parts ; Process remaining PTEs in current phase.
+		;hello83
+		mov ah,ptype_EXTENDED
 		cmp dh,ah ; Are we in phase # 2 already?
 		je nextdrive ; No more partiton tables on this drive.
 		mov dh,ah ; Next phase - search for EXTENDED partition.
 		jmp enum_phases
 		
-nextdrive:	inc dl
+nextdrive:	; Assigned variables at this point:
+		; DL: Drive number.
+		inc dl
 		mov dh,7fh
-		and dh,dl
+		and dh,dl ; DH: 0-based drive number.
 		cmp dh,[bda_hdd_count]
 		jb enum_drives
 
-debug:		mov si,not_found
+		mov si,not_found
 		call puts
 stop:		hlt
 		jmp stop
 
 read_sector:	; Read sector with currently set sector number in DAP.
+		; DL: Drive number.
 		push ax
 		push si
 		mov ah,42h ; Extended Read Sectors From Drive.
@@ -345,7 +354,6 @@ sector		equ dap_tpl.sector - load_addr + run_addr
 
 ; Message text area.
 
-%endif
 %define NL 13, 10 ; CR/LF is newline.
 
 not_found:	db '*NOT* '
