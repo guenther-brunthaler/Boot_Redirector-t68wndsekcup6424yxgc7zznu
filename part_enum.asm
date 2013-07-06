@@ -25,6 +25,10 @@ stacktop_addr	equ work_addr
 ; Byte size of the MBR and all other sectors.
 sector_size	equ 200h
 
+; BIOS data area: Number of hard disks attached (single byte value).
+; It seems CD-ROM drives are also included into this count.
+bda_hdd_count	equ 475h
+
 ; 0x55, 0xaa boot signature.
 sig_size	equ 2
 sig_off		equ sector_size - sig_size
@@ -118,47 +122,33 @@ s1size		equ s1end - s1start
 
 		section code2copy follows=.text \
 		        vstart=(s1size + run_addr) align=1
-s2start:	xor dl,dl ; Drive number to operate on.
-enum_drives:	xor ah,ah; Reset Disk System.
+s2start:	mov dl,80h ; Drive number to operate on (0x80 = 1st hard disk).
+enum_drives:	mov ah,41h; Get int13 extensions supported by drive.
+		mov bx,[pblock_addr + sig_off]
 		; Disk BIOS services may potentially trash: AX, SI, DI, BP, ES.
-		push es
-		int 13h ; AH=result code; CF=1 on error.
-		pop es
-		jnc .getgeom
-		mov si,error
-		call puts
-		mov al,ah
-		xor ah,ah
-		call putns
-		jmp .nextdrive
-.getgeom:	mov ah,8 ; Get Current Drive Parameters.
 		push es
 		int 13h
 		pop es
-		jnc .report
-.nextdrive:	mov dh,80
-		cmp dl,dh
-		jae done
-		mov dl,dh
-		jmp enum_drives
-.report:	mov si,msg
+		jc .nextdrive ; Command failed.
+		mov ax,cx
+		shr ax, 1 ; Set CF to bit # 0 of feature bitmask.
+		jnc .nextdrive ; LBA packet addressing not supported.
+		mov si,msg
 		call puts
-		mov al,dl ; # of drives.
+		mov al,ah
 		xor ah,ah
-		call putns
-		mov al,ch ; # of cylinders.
-		mov ah,cl
-		mov cl,6
-		shr ah,cl
-		call putns
-		mov al,dh ; # heads.
-		xor ah,ah
-		call putns
-		mov al,cl ; # spt.
-		and cl,63
-		call putns
-		pop dx
-		inc dl
+		push ax
+		mov al,dl
+		call putns ; Drive #.
+		mov ax,cx
+		call putns ; Feature mask.
+		pop ax
+		call putns ; Major version.
+.nextdrive:	inc dl
+		mov dh,7fh
+		and dh,dl
+		cmp dh,[bda_hdd_count]
+		jae done
 		jmp enum_drives
 
 done:		mov si,endtext
@@ -235,17 +225,20 @@ video:		; Displays character or string depending on code in AH.
 		pop si
 		ret
 
+%define NL 13, 10 ; CR/LF is newline.
+%define LNUM 0, '.', NL, 0
 
-msg:		db 'Disk parameters for device ', 0
-		db ':', 13, 10, 0
-		db ' drives, ', 0
-		db ' cylinders, ', 0
-		db ' heads, ', 0
-		db ' sectors/track.', 13, 10, 13, 10, 0
+msg:		db 'Drive # ', 0
+		db ' supports features ', 0
+		db ' with major version ', LNUM
 
-endtext:	db 'End of list of disk devices.', 13, 10, 0
+bxmsg:		db 'BX=', 0, ' but should be ', LNUM
 
-error:		db 'Disk error # ', 0, '.', 13, 10, 0
+numdrives:	db 'There are ', 0, ' HDDs present.', NL, 0
+
+endtext:	db 'End of list of disk devices.', NL, 0
+
+error:		db 'Disk error # ', LNUM
 
 s2end:		; Start of unused space after used space.
 s2size		equ s2end - s2start

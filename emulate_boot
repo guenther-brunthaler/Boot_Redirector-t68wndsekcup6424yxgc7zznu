@@ -1,4 +1,9 @@
 #! /bin/sh
+UPD=`which mbr-bootcode-updater 2> /dev/null` || UPD=
+if test -x "$UPD"
+then
+	make && "$UPD" disk.img part_enum.bin || exit
+fi
 for emu in kvm kvm-qemu qemu-kvm qemu ERROR
 do
 	case $emu in
