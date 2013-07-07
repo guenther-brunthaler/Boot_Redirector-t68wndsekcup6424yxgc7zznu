@@ -12,13 +12,14 @@ do
 	esac
 done
 : ${RHOST:=localhost} ${RPORT:=1234}
+
 shift `expr $OPTIND - 1`
 UPD=`which mbr-bootcode-updater 2> /dev/null` || UPD=
 if test -x "$UPD"
 then
 	make && "$UPD" disk.img part_enum.bin || exit
 fi
-for emu in qemu_softmmu_targets_x86_64 kvm kvm-qemu qemu-kvm qemu ERROR
+for emu in qemu-system-i386 qemu_softmmu_targets_x86_64 qemu ERROR
 do
 	case $emu in
 		ERROR) echo "No emulator installed!" >& 2; false; exit
