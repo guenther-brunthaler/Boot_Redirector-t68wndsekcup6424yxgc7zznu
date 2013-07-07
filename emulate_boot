@@ -1,18 +1,23 @@
 #! /bin/sh
+DEBUGGER=
+RHOST=
+RPORT=
+while getopts DH:P: opt
+do
+	case $opt in
+		D) DEBUGGER=Y;;
+		H) RHOST=$OPTARG;;
+		P) RPORT=$OPTARG;;
+		*) false; exit
+	esac
+done
+: ${RHOST:=localhost} ${RPORT:=1234}
+shift `expr $OPTIND - 1`
 UPD=`which mbr-bootcode-updater 2> /dev/null` || UPD=
 if test -x "$UPD"
 then
 	make && "$UPD" disk.img part_enum.bin || exit
 fi
-DEBUGGER=
-while getopts D opt
-do
-	case $opt in
-		D) DEBUGGER=Y;;
-		*) false; exit
-	esac
-done
-shift `expr $OPTIND - 1`
 for emu in qemu_softmmu_targets_x86_64 kvm kvm-qemu qemu-kvm qemu ERROR
 do
 	case $emu in
@@ -23,7 +28,7 @@ do
 	set -- "$@" -name "MS-DOS MBR Test"
 	set -- "$@" -uuid 48f6e600-ddc7-11e2-bc4a-001d7dd0d12e
 	set -- "$@" -smp 1
-	test -n "$DEBUGGER" && set -- "$@" -S -gdb tcp:localhost:1234
+	test -n "$DEBUGGER" && set -- "$@" -S -gdb tcp:"$RHOST:$RPORT"
 	d="file=disk.img,index=0,snapshot=off,media=disk"
 	d="$d,serial=1NC5626A"
 	if test -f cdrom.img
