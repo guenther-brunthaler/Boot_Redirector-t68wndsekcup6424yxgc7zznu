@@ -2,22 +2,27 @@
 DEBUGGER=
 RHOST=
 RPORT=
-while getopts DH:P: opt
+DRY_RUN=
+while getopts DH:P:n opt
 do
 	case $opt in
 		D) DEBUGGER=Y;;
 		H) RHOST=$OPTARG;;
 		P) RPORT=$OPTARG;;
+		n) DRY_RUN=Y;;
 		*) false; exit
 	esac
 done
 : ${RHOST:=localhost} ${RPORT:=1234}
 
 shift `expr $OPTIND - 1`
-UPD=`which mbr-bootcode-updater 2> /dev/null` || UPD=
-if test -x "$UPD"
+if test -z "$DRY_RUN"
 then
-	make && "$UPD" disk.img part_enum.bin || exit
+	UPD=`which mbr-bootcode-updater 2> /dev/null` || UPD=
+	if test -x "$UPD"
+	then
+		make && "$UPD" disk.img part_enum.bin || exit
+	fi
 fi
 for emu in qemu-system-i386 qemu_softmmu_targets_x86_64 qemu ERROR
 do
@@ -29,7 +34,13 @@ do
 	set -- "$@" -name "MS-DOS MBR Test"
 	set -- "$@" -uuid 48f6e600-ddc7-11e2-bc4a-001d7dd0d12e
 	set -- "$@" -smp 1
-	test -n "$DEBUGGER" && set -- "$@" -S -gdb tcp:"$RHOST:$RPORT"
+	if test -n "$DEBUGGER"
+	then
+		set -- "$@" -S -gdb tcp:"$RHOST:$RPORT"
+		set -- "$@" -nographic # No SDL console.
+		set -- "$@" -vnc unix:`pwd`/console # Use 'ssvncviewer ./console' to access
+		set -- "$@" -monitor "unix:`pwd`/monitor,server,nowait"
+	fi
 	d="file=disk.img,index=0,snapshot=off,media=disk"
 	d="$d,serial=1NC5626A"
 	if test -f cdrom.img
@@ -46,6 +57,12 @@ do
 		set -- "$@" -drive "$d"
 	fi
 	echo "Running: >>>$*<<<." >& 2
-	exec "$@"
-	echo "Failed!" >& 2; false; exit
+	if test -n "$DRY_RUN"
+	then
+		echo "(Simulated only.)"
+	else
+		exec "$@"
+		echo "Failed!" >& 2; false
+	fi
+	exit
 done
