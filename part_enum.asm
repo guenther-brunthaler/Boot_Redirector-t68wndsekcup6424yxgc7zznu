@@ -173,17 +173,15 @@ enum_drives:	mov ah,41h; Get int13 extensions supported by drive.
 		shr ax, 1 ; Set CF to bit # 0 of feature bitmask.
 		jnc nextdrive ; LBA packet addressing not supported.
 		
-		; Examine drive - set MBR at sector 0 to be examined next.
-		mov di,sector ; Zero 8 bytes of [sector].
-		xor ax,ax
-		stosw
-		stosw
-		stosw
-		stosw
+		; Examine drive - read MBR at sector 0 to be examined next.
+		mov si,[sector] ; Subtract [sector] from itself - will give 0.
+		xor bl,bl ; No additional offset.
+		stc ; Subtract mode.
+		call read_relsector
+		jc nextdrive ; Read error - ignore this drive.
 		
 enum_parttabs:	; Examine next partition table on current drive.
-		call read_sector
-		jc nextdrive ; Read error - ignore this drive.
+		; New partition table sector has just been successfully loaded.
 		
 		; Make a copy of the partition table for continued use.
 		mov si,(load_addr + pt_off)
@@ -212,42 +210,29 @@ enum_parts:	; Assigned variables at this point:
 
 		; Partition type matches.
 		cmp dh,ptype_EXTENDED ; Are we in phase # 2?
-		pushf ; Remember result.
-		mov bx,s_offset_superblock ; We will load an ext2+ super block.
+		mov bl,s_offset_superblock ; We will load an ext2+ super block.
 		jne .have_offset ; But only in phase # 1.
-		xor bx,bx ; Otherwise, load an EBR in phase # 2.
+		xor bl,bl ; Otherwise, load an EBR in phase # 2.
 
-		; Add BX to RELSECS from PT entry as the new sector number.
+		; Add BL to RELSECS from PT entry as the new sector number.
 .have_offset:	push si
 		add si,(pte_relsecs - pte_type) ; Point to RELSECS field.
-		mov di,sector
-		push cx
-		mov cx,4 ; Add QWORDs as 4 * 2 WORDs.
-		clc ; CF=0 initially.
-.addquad	lodsw ; Current limb from partition table.
-		adc ax,bx ; Add BX and CF to AX.
-		stosw ; Append limb to sector number.
-		xor bx,bx ; Add only CF in the next loop iteration.
-		loop .addquad
-		pop cx
+		call read_relsector ; CF=0 because 'add si' should not overflow.
 		pop si
+		jc nextdrive ; Read error - ignore this drive.
+		cmp dh,ptype_EXTENDED ; Are we in phase # 2?
+		je enum_parttabs ; Yes, examine next EBR.
 
-		popf ; Recall whether we are in phase # 2.
-		je enum_parttabs ; Examine next EBR.
-
-		; Phase # 1 - try to read an ext2+ superblock.
-		call read_sector
-		jc  nextpart ; Could not read it - ignore partition.
-		
+		; Phase # 1 - Examine potential ext2+ superblock.
 		; Check superblock magic.
 		mov ax,[load_addr + s_magic_off]
 		cmp ax,ext_magic
-		jne nextpart ; does not match.
+		jne .notsuper ; does not match.
 		
 		; Check whether there is a UUID.
-		mov ax,[load_addr + s_rev_level_off] ; Must be at least 1.
-		cmp ax, 1
-		jb nextpart ; No UUID.
+		mov ax,[load_addr + s_rev_level_off]
+		cmp ax, s_rev_level_min
+		jb .notsuper ; No UUID.
 		
 		; Finally, compare the UUID itself.
 		push si
@@ -258,21 +243,31 @@ enum_parts:	; Assigned variables at this point:
 		repe cmpsb ; ZF=1 only if match and loop is exhausted.
 		pop cx
 		pop si
-		jne nextpart ; UUIDs did not match.
+		jne .notsuper ; UUIDs did not match.
 		
 		; We have found the searched-for partition!
 		; Load its boot block.
-		add si,(pte_relsecs - pte_type)
-		mov di,sector
-		mov cx,pte_relsecs_size ; Copy one QWORDs.
-		rep movsb
-		call read_sector
-		jc stop ; We are fucked! Extremely unlikely to happen, though.
+		add si,(pte_relsecs - pte_type) ; Point to RELSECS field.
+		mov bl,s_offset_superblock
+		stc ; but subtract it this time.
+		call read_relsector
+		jc stop ; Extremely unlikely as we already read it before.
+		xor bl,bl ; CF=0 and BL=0
+		call read_relsector ; add again, but exclude superblock offset.
+		jc stop ; We are fucked! Very unlikely to happen, though.
 		
 		; Execute to loaded boot code.
 		mov si,found
 		call puts
-		jmp 0:load_addr
+		jmp s1start ; Has been replaced with loaded code, though.
+
+.notsuper:	push si
+		add si,(pte_relsecs - pte_type) ; Point to RELSECS field.
+		mov bl,s_offset_superblock
+		stc ; but subtract it this time.
+		call read_relsector
+		pop si
+		jc stop ; Extremely unlikely as we already read it before.
 		
 nextpart:	; Assigned variables at this point:
 		; DL: Drive number.
@@ -281,7 +276,6 @@ nextpart:	; Assigned variables at this point:
 		; CX: Number of remaining partitions in current table.
 		add si,pte_size
 		loop enum_parts ; Process remaining PTEs in current phase.
-		;hello83
 		mov ah,ptype_EXTENDED
 		cmp dh,ah ; Are we in phase # 2 already?
 		je nextdrive ; No more partiton tables on this drive.
@@ -301,17 +295,43 @@ nextdrive:	; Assigned variables at this point:
 stop:		hlt
 		jmp stop
 
-read_sector:	; Read sector with currently set sector number in DAP.
-		; DL: Drive number.
+read_relsector:	; Add or subtract QWORD at [DS:SI] and also BL to/from
+		; [sector]. CF=0 will add, CF=1 will subtract.
+		; DL is drive number.
+		; Then try to read the sector and set CF=1 on error.
 		push ax
+		push bx
+		push cx
+		push dx
 		push si
+		push di
+		push es
+		rcr dl ; Save add/subtract flag in CF into sign-bit of DL.
+		xor bh,bh ; Make BL a WORD value in BX.
+		mov di,sector
+		mov cx,4 ; Process QWORDs as 4 * 2 WORDs.
+.nextword:	lodsw ; Current limb from source into AX.
+		test dl,dl
+		js .subtract
+		add ax,[di]
+		adc ax,bx
+		jmp .store
+.subtract:	sub ax,[di]
+		sbb ax,bx
+.store:		stosw ; Set limb to result and increment DI.
+		sbb bx,bx ; Convert carry/borrow to new BX.
+		neg bx ; BX will be 1 if there was a carry/borrow, else 0.
+		loop .nextword
 		mov ah,42h ; Extended Read Sectors From Drive.
 		mov si,dap
+		int 13h ; Read sector.
 		push es
-		int 13h
-		pop es
-		pop si
-		pop ax
+		push di
+		push si
+		push dx
+		push cx
+		push bx
+		push ax
 		ret
 
 puts:		; Displays null-terminated string in [DS:SI]++
@@ -326,15 +346,15 @@ puts:		; Displays null-terminated string in [DS:SI]++
 		int 10h ; Get active video page into BH, trashes AX.
 		pop si
 		mov bl,0bh ; Foreground color (most likely unused).
-.string:	lodsb
-		test al,al
-		jz .end
-		mov ah,0eh ; 'tty output' action code for INT10h.
+		jmp .getchar
+.outchar	mov ah,0eh ; 'tty output' action code for INT10h.
 		push si
 		int 10h
 		pop si
-		jmp .string
-.end:		pop di
+.getchar:	lodsb
+		test al,al ; Check for null terminator.
+		jnz .outchar
+		pop di
 		pop bp
 		pop bx
 		pop ax
